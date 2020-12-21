@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <title>gsimaps-vector-annotation-hold</title>
+  <meta name="viewport" content="initial-scale=1.0, maximum-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-hash@0.2.1/leaflet-hash.js"></script>
+  <script src="https://unpkg.com/leaflet.vectorgrid@1.3.0/dist/Leaflet.VectorGrid.bundled.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.6.3/proj4.min.js"></script>
+  <style>
+    #map {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      right: 0;
+    }
+
+    #holdLabel {
+      display: block;
+      position: absolute;
+      z-index: 2000;
+      bottom: 50px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 18px;
+      background: white;
+      border: 1px solid rgba(0, 0, 0, 0.2);
+      border-radius: 16px;
+      padding: 8px 16px;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+
+    .leaflet-control-container::after {
+      content: url(https://maps.gsi.go.jp/image/map/crosshairs.png);
+      z-index: 3000;
+      display: block;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    .annoCtg {
+      white-space: nowrap;
+      font-size: 14px;
+      line-height: 100%;
+      width: auto !important;
+      height: auto !important;
+      margin: 0;
+      padding: 0;
+    }
+
+    .annoCtg code {
+      font-weight: bold;
+      color: #eee;
+      background: black;
+      font-family: monospace;
+      padding: 0 0.2em;
+    }
+
+    .annoCtg span {
+      padding: 0 0.2em;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+  <label id="holdLabel">
+    <input type="checkbox" id="hold" />
+    <span>HOLD</span>
+    <input type="range" id="rotation" value="0" min="-180" max="180" style="display:none;" />
+  </label>
+  <script>
+    const createProjection = function(latlng) {
+      const projection = proj4("EPSG:4326", `+proj=tmerc +lat_0=${latlng.lat} +lon_0=${latlng.lng} +k=0.9999 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs `);
+      return {
+        project: function(latlng) {
+          const xy = projection.forward([latlng.lng, latlng.lat]);
+          return L.point(xy[0], xy[1]);
+        },
+        unproject: function(point) {
+          const ll = projection.inverse([point.x, point.y]);
+          return L.latLng(ll[1], ll[0]);
+        }
+      };
+    };
+
+    const map = L.map("map", L.extend({
+      zoom: 7,
+      center: [35, 135]
+    }, L.Hash.parseHash(location.hash)));
+
+    L.control.layers({
+      "標準地図": L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png", {
+        attribution: "<a href='http://maps.gsi.go.jp/development/ichiran.html'>地理院タイル</a>"
+      }),
+      "淡色地図": L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png", {
+        attribution: "<a href='http://maps.gsi.go.jp/development/ichiran.html'>地理院タイル</a>"
+      }),
+      "写真": L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg", {
+        attribution: "<a href='http://maps.gsi.go.jp/development/ichiran.html'>地理院タイル</a>"
+      }).addTo(map),
+      "OpenStreetMap": L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; <a href='http://osm.org/copyright'>OpenStreetMap</a> contributors"
+      })
+    }).addTo(map);
+
+    map.zoomControl.setPosition("bottomright");
+
+    L.control.scale({
+      imperial: false,
+      metric: true
+    }).addTo(map);
+
+    L.hash(map);
+
+    const group = L.featureGroup().addTo(map);
+
+    const layer = Object.assign(L.gridLayer({
+      maxZoom: 20,
+      maxNativeZoom: 17,
+      minZoom: 5,
+      attribution: "<a href='https://github.com/gsi-cyberjapan/gsimaps-vector-experiment'>地理院地図Vector</a>",
+      tileSize: 512,
+      url: "https://cyberjapandata.gsi.go.jp/xyz/experimental_bvmap/{z}/{x}/{y}.pbf"
+    }), {
+      createTile: function(coords) {
+        coords.z--;
+        const div = document.createElement('div');
+        div.markers = [];
+        fetch(L.Util.template(this.options.url, coords)).then(a => a.ok ? a.arrayBuffer() : null).then(buffer => {
+          if (buffer === null || div.markers === undefined) return;
+          const layer = new VectorTile(new Pbf(buffer)).layers.label;
+          if (layer === undefined) return;
+          for (let i = 0; i < layer.length; i++) {
+            const geojson = layer.feature(i).toGeoJSON(coords.x, coords.y, coords.z);
+            const lat = geojson.geometry.coordinates[1];
+            const lon = geojson.geometry.coordinates[0];
+            const annoCtg = geojson.properties.annoCtg;
+            const knj = geojson.properties.knj;
+            const hue = (parseInt(annoCtg.toString().substring(0, 3)) - 100) / 900 * 360;
+            const marker = L.marker([lat, lon], {
+              attribution: "<a href='https://github.com/gsi-cyberjapan/gsimaps-vector-experiment'>地理院地図Vector</a>",
+              icon: L.divIcon({
+                className: `annoCtg annoCtg${annoCtg}`,
+                html: `<code>${annoCtg}</code><span style='background:hsl(${hue},100%,50%)'>${knj}</span>`
+              })
+            }).on("click", function() {
+              if ($(this._icon).is(".focus")) {
+                $(".focus").removeClass("focus");
+                $(".annoCtg").show();
+              } else {
+                $(".annoCtg").hide();
+                $(".annoCtg" + annoCtg).addClass("focus").show();
+              }
+            }).addTo(group);
+            div.markers.push(marker);
+          }
+        });
+        return div;
+      }
+    }).on("tileunload", function(e) {
+      if (e.tile.markers) {
+        e.tile.markers.forEach(marker => {
+          if (marker.options.point === undefined)
+            group.removeLayer(marker);
+        });
+        delete e.tile.markers;
+      }
+    }).addTo(map);
+
+    $("#hold").change(function() {
+      if ($(this).is(":checked")) {
+        $("#rotation").val(0).show();
+        const projection = createProjection(map.getCenter());
+        group.eachLayer(marker => {
+          marker.options.point = projection.project(marker.getLatLng());
+        });
+        map.removeLayer(layer);
+      } else {
+        $("#rotation").val(0).hide();
+        map.addLayer(layer);
+        group.clearLayers();
+      }
+    });
+
+    $("#rotation").on("input change", function() {
+      map.fire("move");
+    });
+
+    map.on("move", function() {
+      const radian = Math.PI * $("#rotation").val() / 180;
+      const cos = Math.cos(radian);
+      const sin = Math.sin(radian);
+      const rotate = function(point) {
+        return L.point(
+          cos * point.x - sin * point.y,
+          sin * point.x + cos * point.y
+        );
+      };
+      const projection = createProjection(map.getCenter());
+      group.eachLayer(function(marker) {
+        if (marker.options.point)
+          marker.setLatLng(projection.unproject(rotate(marker.options.point)));
+      });
+    });
+  </script>
+</body>
+
+</html>
